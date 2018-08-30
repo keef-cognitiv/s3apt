@@ -108,19 +108,20 @@ def read_control_data(deb_obj):
         os.remove(tmp)
 
 
-def get_cached_control_data(deb_obj):
+def get_cached_control_data(deb_obj, etag):
     """
     Get cached control file information about a debian package, or build it if
     this is the first time.
     """
     s3 = boto3.resource('s3')
-    etag = deb_obj.e_tag.strip('"')
+    etag = etag.strip('"')
 
     cache_obj = s3.Object(bucket_name=config.APT_REPO_BUCKET_NAME, key=config.CONTROL_DATA_CACHE_PREFIX + '/' + etag)
     exists = True
     try:
         control_data = cache_obj.get()['Body'].read()
     except botocore.exceptions.ClientError as e:
+        print("While reading cache: {}".format(e))
         if e.response['Error']['Code'] == 'NoSuchKey':
             exists = False
         else:
@@ -191,8 +192,11 @@ def rebuild_package_index(prefix):
     for obj in deb_objs:
         print(obj.key)
 
-        pkginfo = get_cached_control_data(obj)
-        pkginfo = pkginfo + "\n%s\n" % ("Filename: %s" % obj.key)
+        pkginfo = get_cached_control_data(obj, obj.e_tag)
+        key = obj.key.strip()
+        if key.startswith(config.APT_REPO_KEY_PREFIX):
+            key = key[len(config.APT_REPO_KEY_PREFIX):]
+        pkginfo = pkginfo + "\n%s\n" % ("Filename: %s" % key)
         pkginfos.append(pkginfo)
 
     package_index_obj = s3.Object(bucket_name=config.APT_REPO_BUCKET_NAME, key=prefix + "/Packages")
@@ -218,7 +222,6 @@ def lambda_handler(event, context):
     bucket = event['Records'][0]['s3']['bucket']['name']
     key = urllib.unquote_plus(event['Records'][0]['s3']['object']['key']).decode('utf8')
 
-
     # If the Packages index changed or was deleted, try again to rebuild it to
     # make sure it is up to date.
     if key.endswith("/Packages"):
@@ -230,7 +233,7 @@ def lambda_handler(event, context):
         s3 = boto3.resource('s3')
         deb_obj = s3.Object(bucket_name=bucket, key=key)
         print("S3 Notification of new key. Ensuring cached control data exists: %s" % (str(deb_obj)))
-        get_cached_control_data(deb_obj)
+        get_cached_control_data(deb_obj, event['Records'][0]['s3']['object']['eTag'])
 
     # If a package inside this bucket was updated (added or deleted), rebuild the index.
     if bucket == config.APT_REPO_BUCKET_NAME and key.endswith(".deb"):
